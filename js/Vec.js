@@ -22,8 +22,8 @@ define(["Squishy"], function() {
         Create: function(x, y) { return [x, y]; },
         IsValid: function(v) { return v instanceof Array && v.length == 2 && isFinite(v[0]) && isFinite(v[1]); },
         SetZero: function(v) { v[Axis.X] = 0.0; v[Axis.Y] = 0.0; },
-        SetV: function(x_, y_) {v[Axis.X]=x_; v[Axis.Y]=y_;},
-        Set: function(u) {v[Axis.X]=u[Axis.X]; v[Axis.Y]=u[Axis.Y];},
+        SetV: function(v, x_, y_) {v[Axis.X]=x_; v[Axis.Y]=y_;},
+        Set: function(v, u) {v[Axis.X]=u[Axis.X]; v[Axis.Y]=u[Axis.Y];},
 
         Negative: function() { return [-v[Axis.X], -v[Axis.Y]]; },
 
@@ -169,7 +169,9 @@ define(["Squishy"], function() {
         ScaleAndTranslate: function(v, scaleV, translationV) {
             Vec.Scale(v, scaleV);
             Vec.Translate(v, translationV);
-        }
+        },
+        
+        Zero: function() { return [0, 0]; }
     };
     
     return Vec;

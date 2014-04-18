@@ -135,10 +135,10 @@ require(dependencies, function(jquery, jqueryUI, jqueryUILayout, mousetrap, Vec,
     var WorldObject = squishy.createClass(
         function(objectDefinition) {
             // copy all parameters into object
-            squishy.clone(objectDefinition, true, this);
+            squishy.clone(objectDefinition, false, this);
             
             // objects must have a position and a shape
-            squishy.assert(Vec.isValid(this.position), "position is invalid.");
+            squishy.assert(Vec.IsValid(this.position), "position is invalid.");
             squishy.assert(this.shape, "shape was not defined.");
         },{
             // methods
@@ -315,11 +315,11 @@ require(dependencies, function(jquery, jqueryUI, jqueryUILayout, mousetrap, Vec,
                 obj.objectId = obj.objectId || ++this.lastObjectId;
                 
                 // make sure, objects cannot be added twice
-                squishy.assert(!this.objects[objectId], "Object was added twice: " + obj);
+                squishy.assert(!this.objects[obj.objectId], "Object was added twice: " + obj);
                 
                 // add object
-                this.objects[objectId] = obj;
-                if (obj.isMovable()) {
+                this.objects[obj.objectId] = obj;
+                if (obj.canMove()) {
                     this.movables[obj.objectId] = obj;
                 }
                 
@@ -336,7 +336,7 @@ require(dependencies, function(jquery, jqueryUI, jqueryUILayout, mousetrap, Vec,
                 
                 // delete
                 delete this.objects[obj.objectId];
-                if (obj.isMovable()) {
+                if (obj.canMove()) {
                     delete this.movables[obj.objectId];
                 }
             },
@@ -379,11 +379,8 @@ require(dependencies, function(jquery, jqueryUI, jqueryUILayout, mousetrap, Vec,
     );
     
     
-    
-    
     // #######################################################################################################################
     // UI settings & SimplePlatformerUI Class
-    
     
     /**
      * @const
@@ -394,8 +391,10 @@ require(dependencies, function(jquery, jqueryUI, jqueryUILayout, mousetrap, Vec,
         "right": "0px",
         "top": "0px",
         "bottom": "0px",
+        "width": "100%",
+        "height": "100%",
         
-        "background-color": "grey"
+        "background-color": "red"
     };
     
     var SimplePlatformerUI = squishy.createClass(
@@ -425,32 +424,42 @@ require(dependencies, function(jquery, jqueryUI, jqueryUILayout, mousetrap, Vec,
             setupUI: function() {
                 this.containerEl.css(gameContainerCSS);
                 var canvas = this.canvas = $("<canvas></canvas>");
+                this.containerEl.append(canvas);
                 canvas.css(gameContainerCSS);
+                canvas.css("background-color", "grey");
+                
+                var w = this.containerEl.innerWidth();
+                var h = this.containerEl.innerHeight();
+                this.canvas[0].width = this.world.config.worldBox.dimensions[0];
+                this.canvas[0].height = this.world.config.worldBox.dimensions[1];
             },
             
             render: function(timestamp) {
                 // re-draw all objects
-                var context = this.canvas[0].getContext('2d');
+                var canvas = this.canvas[0];
+                var context = canvas.getContext('2d');
+                var w = canvas.width;
+                var h = canvas.height;
+                context.clearRect(0, 0, w, h);
+                
+                var min = Vec.Zero();
                 squishy.forEachOwnProp(this.world.objects, function(objId, obj) {
                     var shape = obj.getShape();
                     var shapeType = shape.getShapeType();
-                    var pos = obj.position;
+                    Vec.Set(min, obj.position);
                     switch (shapeType) {
                         case ShapeType.AABB:
-                            var min = shape.min;
-                            Vec.Add(min, pos);
-                            var max = shape.max;
-                            Vec.Add(max, pos);
+                            Vec.Add(min, shape.min);
                         
                             // draw filled rectangle with a border
                             // see http://www.html5canvastutorials.com/tutorials/html5-canvas-rectangles/
                             context.beginPath();
-                            context.rect(min[Axis.X], min[Axis.Y], max[Axis.X], max[Axis.Y]);
-                            context.fillStyle = 'yellow';
+                            context.rect(min[Axis.X], min[Axis.Y], shape.dimensions[Axis.X], shape.dimensions[Axis.Y]);
+                            context.fillStyle = '#4444EE';
                             context.fill();
-                            context.lineWidth = 2;
-                            context.strokeStyle = '#4444EE';      // dark blue
-                            context.stroke();
+                            // context.lineWidth = 1;
+                            // context.strokeStyle = '#4444EE';      // dark blue
+                            // context.stroke();
                             break;
                         default:
                             throw new Error("Shape not yet supported: " + ShapeTypes.toString(shapeType));
@@ -465,16 +474,32 @@ require(dependencies, function(jquery, jqueryUI, jqueryUILayout, mousetrap, Vec,
     // #######################################################################################################################
     // Setup a simple world & start UI
     
-    var worldSize = 500;
+    var worldSize = 1000;
     
     var cfg = {
         dt: 60,
         gravity: Vec.Create(1,0),
-        worldBox: new AABBShape([0, 0], [worldSize, worldSize]),
-        
+        worldBox: new AABBShape([0, 0], [worldSize, worldSize])
     };
     
     var game = new SimplePlatformerWorld(cfg);
+    
+    var AddBox = function(x, y, w, h) {
+        var def = {
+            position: [x, y],
+            shape: new AABBShape([0, 0], [w, h])
+        };
+        
+        var obj = new WorldObject(def);
+        game.addObject(obj);
+        return obj;
+    };
+    
+    AddBox(10, 10, 100, 10);
+    AddBox(10, 190, 50, 10);
+    AddBox(400, 400, 30, 10);
+    
+    // start UI
     var gameEl = $("#game");
     var gameUI = new SimplePlatformerUI(gameEl, game);
 });
