@@ -1,7 +1,7 @@
 SimplePlatformer
 ================
 
-SimplePlatformer is a simple platformer (nuff said)?
+SimplePlatformer is a (very) simple platformer game and a basic AI test bed.
 
 
 Things to consider:
