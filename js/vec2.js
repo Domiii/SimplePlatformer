@@ -42,7 +42,10 @@ define(["Squishy"], function() {
         getOtherAxis: function(axis) { return axis == Axis.X ? Axis.Y : Axis.X; }
     };
     
-    squishy.assert(typeof(Float32Array) !== "undefined", "Float32Array is required.");
+    // array settings
+    var Vec2Type = Float32Array;
+    squishy.assert(typeof(Vec2Type) !== "undefined", "Float32Array is required.");
+    Float32Array.prototype.toString = function() { return vec2.str(this); };
     
     /**
      * @class 2 Dimensional Vector
@@ -56,11 +59,16 @@ define(["Squishy"], function() {
      * @returns {vec2} a new 2D vector
      */
     vec2.create = function() {
-        var out = new Float32Array(2);
+        var out = new Vec2Type(2);
         out[0] = 0;
         out[1] = 0;
         return out;
     };
+    
+    /**
+     * TODO: Replace this with proper pooling, and compare.
+     */
+    vec2.createTemp = vec2.create;
 
     /**
      * Creates a new vec2 initialized with values from an existing vector
@@ -69,7 +77,7 @@ define(["Squishy"], function() {
      * @returns {vec2} a new 2D vector
      */
     vec2.clone = function(a) {
-        var out = new Float32Array(2);
+        var out = new Vec2Type(2);
         out[0] = a[0];
         out[1] = a[1];
         return out;
@@ -83,7 +91,7 @@ define(["Squishy"], function() {
      * @returns {vec2} a new 2D vector
      */
     vec2.fromValues = function(x, y) {
-        var out = new Float32Array(2);
+        var out = new Vec2Type(2);
         out[0] = x;
         out[1] = y;
         return out;
@@ -191,7 +199,7 @@ define(["Squishy"], function() {
     vec2.div = vec2.divide;
 
     /**
-     * Returns the minimum of two vec2's
+     * Compute the component-wise minimum of two vec2's
      *
      * @param {vec2} out the receiving vector
      * @param {vec2} a the first operand
@@ -205,7 +213,7 @@ define(["Squishy"], function() {
     };
 
     /**
-     * Returns the maximum of two vec2's
+     * Compute the component-wise maximum of two vec2's
      *
      * @param {vec2} out the receiving vector
      * @param {vec2} a the first operand
@@ -227,6 +235,8 @@ define(["Squishy"], function() {
      * @returns {vec2} out
      */
     vec2.scale = function(out, a, b) {
+        //squishy.assert(vec2.isValid(out) && vec2.isValid(a), "out and a must be valid vec2's.");
+        
         out[0] = a[0] * b;
         out[1] = a[1] * b;
         return out;
@@ -530,6 +540,10 @@ define(["Squishy"], function() {
     vec2.str = function (a) {
         return 'vec2(' + a[0] + ', ' + a[1] + ')';
     };
+    
+    
+    // #####################################################################################################################
+    // some added features
 
     /**
      * Whether the given value is a valid 2D vector.
@@ -538,6 +552,26 @@ define(["Squishy"], function() {
      */
     vec2.isValid = function (v) {
         return v && v.length === 2 && isFinite(v[0]) && isFinite(v[1]);
+    };
+    
+    vec2.abs = function(out, v) {
+        out[0] = Math.abs(v[0]);
+        out[1] = Math.abs(v[1]);
+    };
+
+    /**
+     * Subtracts two vec2's after scaling the second operand by a scalar value
+     *
+     * @param {vec2} out the receiving vector
+     * @param {vec2} a the first operand
+     * @param {vec2} b the second operand
+     * @param {Number} scale the amount to scale b by before subtracting
+     * @returns {vec2} out
+     */
+    vec2.scaleAndSubtract = function(out, a, b, scale) {
+        out[0] = a[0] - (b[0] * scale);
+        out[1] = a[1] - (b[1] * scale);
+        return out;
     };
     
     return vec2;

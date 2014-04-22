@@ -10,6 +10,7 @@
  */
 "use strict";
 
+
 // configure requirejs
 require.config({
     baseUrl: "",
@@ -57,8 +58,10 @@ var dependencies = [
     "JS/vec2",
 
     // Other utilities
-    "Squishy", "Lib/GameAI",
-    "localizer"
+    "Squishy",
+    "localizer",
+    "Lib/GameAI"
+    //"Lib/CodeContracts"
 ];
 
 
@@ -81,22 +84,6 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
 
     // #######################################################################################################################
     // Shapes & Surfaces
-
-    /**
-     * Simple AABB storage class.
-     * @constructor
-     */
-    var AABB = squishy.createClass(
-        function(min, max) {
-            this.min = min;
-            this.max = max;
-            vec2.subtract(this.dimensions, max, min);
-        },{
-            getArea: function () {
-                return this.dimensions[Axis.X] * this.dimensions[Axis.Y];
-            },
-        }
-    );
     
     /**
      * Defines all currently implemented shapes.
@@ -113,6 +100,30 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
     var SurfaceType = squishy.makeEnum([
         "LineSegment"
     ]);
+
+    /**
+     * Defines all currently implemented types of objects.
+     * @const
+     */
+    var ObjectType = squishy.makeFlagEnum([
+        "RigidBody", "Movable", "Agent"
+    ]);
+
+    /**
+     * Simple AABB storage class.
+     * @constructor
+     */
+    var AABB = squishy.createClass(
+        function(min, max) {
+            this.min = min;
+            this.max = max;
+            this.dimensions = vec2.subtract(vec2.create(), max, min);
+        },{
+            getArea: function () {
+                return this.dimensions[Axis.X] * this.dimensions[Axis.Y];
+            },
+        }
+    );
     
     /**
      * A simple oriented 2D surface.
@@ -140,7 +151,7 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
      */
     var LineSegment = squishy.extendClass(Surface,
         function (from, to, normal, dontNormalizeNormal) {
-            this._base();
+            this._super();
             
             if (!dontNormalizeNormal) {
                 vec2.normalize(normal, normal);
@@ -149,7 +160,7 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
             this.from = from;
             this.to = to;
             this.normal = normal;
-            vec2.subtract(this.delta, this.to, this.from);        // the vector pointing from "from" to "to"
+            this.delta = vec2.subtract(vec2.create(), this.to, this.from);        // the vector pointing from "from" to "to"
         }, {
             // methods
             getSurfaceType: function() { return SurfaceType.LineSegment; },
@@ -171,7 +182,7 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
             getShapeType: squishy.abstractMethod(),
             getSurfaces: squishy.abstractMethod(),
             getArea: squishy.abstractMethod(),
-            getVertices: squishy.abstractMethod(),      // currently, collision detection only works with linearized surfaces
+            //getVertices: squishy.abstractMethod(),      // currently, collision detection only works with linearized surfaces
             containsPoint: squishy.abstractMethod(),
         }
     );
@@ -183,27 +194,29 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
      */
     var AABBShape = squishy.extendClass(Shape,
         function (minVertex, maxVertex) {
-            this._base();
+            this._super();
         
             this.min = minVertex;
             this.max = maxVertex;
-            vec2.subtract(this.dimensions, this.max, this.min);
+            this.dimensions = vec2.subtract(vec2.create(), this.max, this.min);
             
             // build line segments to outline the box
             var a = this.min;
-            var b = vec2.CopyGet(this.min);
+            var b = vec2.clone(this.min);
             b[Axis.X] = this.max[Axis.X];
             var c = this.max;
-            var d = vec2.CopyGet(this.min);
+            var d = vec2.clone(this.min);
             d[Axis.Y] = this.max[Axis.Y];
             
             this.vertices = [a, b, c, d];
+            this.center = vec2.create();
+            vec2.scale(this.center, vec2.add(this.center, this.min, this.max), .5);      // center = (min + max)/2
             
             this.surfaces = [];
-            this.surfaces.push(new LineSegment(a, b, vec2.subtract(vec2.create(), a, d)));
-            this.surfaces.push(new LineSegment(b, c, vec2.subtract(vec2.create(), b, a)));
-            this.surfaces.push(new LineSegment(c, d, vec2.subtract(vec2.create(), c, b)));
-            this.surfaces.push(new LineSegment(d, a, vec2.subtract(vec2.create(), d, c)));
+            this.surfaces.push(new LineSegment(d, a, vec2.subtract(vec2.create(), d, c)));  // minX
+            this.surfaces.push(new LineSegment(a, b, vec2.subtract(vec2.create(), a, d)));  // minY
+            this.surfaces.push(new LineSegment(b, c, vec2.subtract(vec2.create(), b, a)));  // maxX
+            this.surfaces.push(new LineSegment(c, d, vec2.subtract(vec2.create(), c, b)));  // maxY
         },{
             // methods
 
@@ -237,6 +250,15 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
                 var y = point[Axis.Y];
                 
                 return x >= this.min[Axis.X] && x <= this.max[Axis.X] && y >= this.min[Axis.Y]  && y <= this.max[Axis.Y];
+            },
+                
+            /**
+             * Every surface of an AABB can be described by knowing on which axis (x or y)
+             * and knowing whether it is the min or max of the two.
+             */
+            getSide: function(xAxis, minSide) {
+                var index = xAxis + (minSide * 2);
+                return this.surfaces[index];
             }
         }
     );
@@ -254,35 +276,28 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
             // copy all parameters into object
             squishy.clone(objectDefinition, false, this);
 
-            // objects must have a position and a shape
+            // objects must have a position, shape and stepHeight
             squishy.assert(vec2.isValid(this.position), "position is invalid.");
             squishy.assert(this.shape, "shape was not defined.");
+            
+            this.stepHeight = this.stepHeight || vec2.fromValues(0, 0); // cannot move over any obstacles
         }, {
             // methods
-            getShape: function () {
-                return this.shape;
-            },
-
-            /**
-             * Wether this is an agent. Agents can move and can die.
-             */
-            isAgent: function () {
-                return false;
-            },
+            getObjectType: function() { return ObjectType.RigidBody; },
+            
+            isObjectType: function(objectType) { return this.getObjectType() & objectType; },
+            
+            getShape: function () { return this.shape; },
 
             /**
              * Static objects or agents without health are dead.
              */
-            isAlive: function () {
-                return this.health > 0;
-            },
+            isAlive: function () { return this.health > 0; },
 
             /**
              * Currently, only living agents can move.
              */
-            canMove: function () {
-                return false;
-            },
+            canMove: function () { return false; },
             
             /**
              * Test whether this object contains the given point in world coordinates.
@@ -292,7 +307,9 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
                 // Currently, only translations are supported, so a change of coordinate systems can only change the origin.
                 var localPoint = vec2.subtract(worldPoint, worldPoint, this.position);
                 return this.shape.containsPoint(localPoint);
-            }
+            },
+            
+            toString: function() { return this.objectId; }
         }
     );
 
@@ -307,15 +324,24 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
      */
     var Movable = squishy.extendClass(RigidBody,
         function (objectDefinition) {
-            this._base(objectDefinition);
+            this._super(objectDefinition);
 
             // movables have velocity and acceleration
-            squishy.assert(vec2.isValid(this.velocity), "velocity is invalid.");
-            squishy.assert(vec2.isValid(this.acceleration), "acceleration is invalid.");
-
+            if (!vec2.isValid(this.velocity)) {
+                this.velocity = vec2.create();
+            }
+            if (!vec2.isValid(this.acceleration)) {
+                this.acceleration = vec2.create();
+            }
+            
+            this.onGround = false;
+            this.lastGroundIteration = 0;
+            this.lastPositionDelta = vec2.create();
         }, {
             // methods
 
+            getObjectType: function() { return ObjectType.RigidBody | ObjectType.Movable; },
+            
             /**
              * Wether this is an agent. Agents can move and die.
              */
@@ -327,15 +353,24 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
              * Whether this object is currently not touching ground.
              */
             isFalling: function () {
-                return falling;
+                return !this.onGround;
             },
 
             /**
-             * Movable is back on the ground and thus cannot be affected by .
+             * Movable just hit the ground.
              */
             onHitGround: function () {
                 this.onGround = true;
-            }
+            },
+            
+            /**
+             * Movable just took off from the ground
+             */
+            onLeftGround: function() {
+                this.onGround = false;
+            },
+            
+            onStep: function(dt) {},
         }
     );
 
@@ -350,14 +385,35 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
      */
     var Agent = squishy.extendClass(Movable,
         function (objectDefinition) {
-            this._base(objectDefinition);
+            this._super(objectDefinition);
+            
+            // check configuration options
+            /**
+             * Horizontal speed when moving left and right on the ground.
+             */
+            this.groundControlSpeed = this.groundControlSpeed || 30;
+            
+            /**
+             * How much of the ground speed one gets when mid-air (in the real world, this is 0, unless you have a jetpack, or other propulsion methods).
+             */
+            this.airControlRatio = this.airControlRatio || 1;
+            
+            /**
+             * Vertical initial speed when jumping.
+             */
+            this.jumpSpeed = this.jumpSpeed || 500;
 
             // agents start alive
             squishy.assert(this.maxHealth > 0);
-            this.health = objectDefinition.maxHealth;
+            this.health = this.maxHealth;
+            
+            // intermediate variable
+            this.controlSpeed = 0;
         }, {
             // methods
 
+            getObjectType: function() { return ObjectType.RigidBody | ObjectType.Movable | ObjectType.Agent; },
+            
             /**
              * Wether this is an agent. Agents can move and die.
              */
@@ -367,12 +423,8 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
 
 
             // Agent actions
-
-            /**
-             *
-             */
-            jump: function () {
-                squishy.assert(this.canMove(), "Immovable object is trying to jump: " + this);
+            getCurrentControlSpeed: function() {
+                return this.isFalling() ? this.groundControlSpeed * this.airControlRatio : this.groundControlSpeed;
             },
 
             /**
@@ -381,14 +433,24 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
             performAction: function (action) {
                 switch (action) {
                 case (AgentAction.startMoveLeft):
+                    this.controlSpeed = -this.getCurrentControlSpeed();
                     break;
                 case (AgentAction.startMoveRight):
+                    this.controlSpeed = this.getCurrentControlSpeed();
                     break;
                 case (AgentAction.stopMove):
+                    this.controlSpeed = 0;
                     break;
                 case (AgentAction.jump):
+                    if (!this.isFalling()) {
+                        this.velocity[Axis.Y] = this.jumpSpeed;
+                    }
                     break;
                 }
+            },
+            
+            onStep: function(dt) {
+                this.velocity[Axis.X] = this.controlSpeed;
             }
         }
     );
@@ -415,15 +477,21 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
     // #######################################################################################################################
     // World class & accessories
     
+    
+    /**
+     * Represents a collision between two AABBs.
+     * @constructor
+     */
     var CollisionPair = squishy.createClass(
         function() {
         },{
             setObjects: function(obj1, obj2) {
                 this.obj1 = obj1;
                 this.obj2 = obj2;
+                this.penetration = vec2.create();
             },
             
-            updateInfo: function(currentIteration) {
+            refresh: function(currentIteration) {
                 this.lastActiveIteration = currentIteration;
             }
         }
@@ -432,6 +500,7 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
     /**
      * Stores collision pairs and avoids duplicate reporting.
      * Also provides a pool for CollisionPair objects to reduce GC intervention.
+     * @constructor
      * @see http://bullet.googlecode.com/files/GDC10_Coumans_Erwin_Contact.pdf
      */
     var CollisionList = squishy.createClass(
@@ -450,20 +519,20 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
              *
              * @return {Bool} Returns true if obj1 comes first.
              */
-            compareObjects(obj1, obj2) {
-                var isObj1Movable = obj1 instanceof Movable;
-                var isObj2Movable = obj2 instanceof Movable;
+            compareObjects: function(obj1, obj2) {
+                var isObj1Movable = obj1.isObjectType(ObjectType.Movable);
+                var isObj2Movable = obj2.isObjectType(ObjectType.Movable);
                 if (isObj1Movable == isObj2Movable) {
                     // same type -> sort by ID
                     return obj1.objectId - obj2.objectId > 0;
                 }
-                // movable objects are greater than non-movable ones.
+                // movable objects are "greater than" non-movable ones.
                 return isObj1Movable ? true : false;
             },
             
             addPair: function(obj1, obj2) {
                 // in order to identify this pair, we need to establish an order between the two objects
-                if (!compareObjects(obj1, obj2)) {
+                if (!this.compareObjects(obj1, obj2)) {
                     // swap the order of the two
                     var tmp = obj2;
                     obj2 = obj1;
@@ -478,9 +547,9 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
             
             getOrCreatePair: function(obj1, obj2) {
                 // get or create collision list
-                var obj1CollisionList = this[obj1.objectId];
+                var obj1CollisionList = this.pairs[obj1.objectId];
                 if (!obj1CollisionList) {
-                    obj1CollisionList = this[obj1.objectId] = {};
+                    obj1CollisionList = this.pairs[obj1.objectId] = {};
                 }
                 
                 var pair = obj1CollisionList[obj2.objectId];
@@ -502,9 +571,26 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
                     pair.setObjects(obj1, obj2);
                 }
                 
-                // TODO: update collision info
-                pair.updateInfo(this.currentIteration);
+                pair.refresh(this.currentIteration);
                 return pair;
+            },
+            
+            callForEachPair: function(onNewCollision, onContactGone, thisArg) {
+                for (var obj1Id in this.pairs) {
+                    var pairList = this.pairs[obj1Id];
+                    for (var obj2Id in pairList) {
+                        var pair = pairList[obj2Id];
+                        var d = this.currentIteration - pair.lastActiveIteration;
+                        if (d == 0) {
+                            // if this collision is still active, go for it
+                            onNewCollision.call(thisArg, pair);
+                        }
+                        else if (d == 1) {
+                            // this collision was active last round, but not active anymore, so contact was broken
+                            onContactGone.call(thisArg, pair);
+                        }
+                    }
+                }
             },
             
             clearPool: function() {
@@ -518,24 +604,24 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
      * This handles the physical aspect of the game, especially movement.
      *
      * @constructor
-     * @param {b2AABB} worldBox Defines the bounds of the world.
      */
     var SimplePlatformerWorld = squishy.createClass(
         function (config) {
-            config.dt = config.dt || 60;            // set default dt
+            config.Dt = config.Dt || .06;            // set default dt
             
             // check parameter validity
             squishy.assert(config, "config is undefined");
-            squishy.assert(config.dt > 0, "config.dt is invalid"); // must be positive
-            squishy.assert(vec2.isValid(config.gravity));
-            squishy.assert(config.worldBox && config.worldBox.getArea() > 0, "config.worldBox is invalid");
+            squishy.assert(config.Dt > 0, "config.Dt is invalid"); // must be positive
+            squishy.assert(vec2.isValid(config.Gravity));
+            squishy.assert(config.WorldBox && config.WorldBox.getArea() > 0, "config.WorldBox is invalid");
 
             this.lastObjectId = 0; // running id for new objects
+            this.currentIteration = 1;
 
             // assign properties
             this.config = config;
 
-            // create set of all objects & movables in this world
+            // keep track of all objects (including movables), all movables, all current collisions
             this.objects = {};
             this.movables = {};
             this.collisions = new CollisionList();
@@ -543,9 +629,14 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
             // create all world events
             this.events = {
                 /**
-                 * Platformer starts. args = configuration + all initially visible objects.
+                 * Game just started. // args = configuration + all initially visible objects.
                  */
-                started: squishy.createEvent(this),
+                start: squishy.createEvent(this),
+                
+                /**
+                 * Game is about to stop. // args = configuration + all initially visible objects.
+                 */
+                stopping: squishy.createEvent(this),
 
                 /**
                  * Object moved. args = updated object state
@@ -590,9 +681,11 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
 
                 // add object
                 this.objects[obj.objectId] = obj;
-                if (obj instanceof Movable) {
+                if (obj.isObjectType(ObjectType.Movable)) {
                     this.movables[obj.objectId] = obj;
                 }
+                
+                console.log("Added object #" + obj.objectId + " of type: " + obj.getObjectType());
 
                 // fire event
                 this.events.objectAdded.fire(obj);
@@ -607,7 +700,7 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
 
                 // delete
                 delete this.objects[obj.objectId];
-                if (obj instanceof Movable) {
+                if (obj.isObjectType(ObjectType.Movable)) {
                     delete this.movables[obj.objectId];
                 }
             },
@@ -636,42 +729,52 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
 
             // ####################################################################################
             // World physics simulation
+            
+            /**
+             * Start or stop running.
+             */
+            startStopLoop: function(dt) {
+                if (this.loopTimer) this.stopLoop();
+                else this.startLoop();
+            },
+            
+            startLoop: function(dt) {
+                if (this.loopTimer) return;
+                //this.loopTimer = setInterval(this.step.bind(this), dt);
+                this.loopTimer = setInterval(this.step.bind(this), dt * 1000);
+            },
+            
+            stopLoop: function(dt) {
+                if (!this.loopTimer) return;
+                clearInterval(this.loopTimer);
+                this.loopTimer = null;
+            },
 
             /**
-             * Advance step by given amount of time. Uses config.dt, if dt is not given.
+             * Advance step by given amount of time. Uses config.Dt, if dt is not given.
              */
             step: function (dt) {
-                dt = dt || this.config.dt;
+                // TODO: Compute actual dt
+                dt = dt || this.config.Dt;
 
                 // update velocity and position
-                this.integrateStep();
+                this.integrateStep(dt);
 
                 // detect collisions
-                squishy.forEachOwnProp(this.movables, this.checkCollision);
+                this.collisions.setCurrentIteration(++this.currentIteration);
+                for (var objId in this.movables) {
+                    if (!this.movables.hasOwnProperty(objId)) continue;
+                    this.detectCollisions(this.movables[objId]);
+                }
 
                 // resolve collisions
+                this.collisions.callForEachPair(this.onNewCollision, this.onContactGone, this);
 
                 // run event listeners
                 this.events.step.fire(dt);
             },
             
-            checkCollision: function (movableId, movable) {
-                // TODO: Build kd-tree, BVI or other accelerating data structure to minimize collision search space
-                // check against every other possibly colliding object
-                for (var objectId in this.objects) {
-                    if (!this.objects.hasOwnProperty(objectId)) continue;
-                    if (movableId == objId) continue; // don't check intersection with itself (bodies are assumed to be rigid)
-                    var obj = this.objects[objectId];
-                    
-                    // use continuous collision detection to prevent collisions (basically, collision resolution will roll back time)
-                    // if only working with linear line segments, continuous collision detection is simple:
-                    // If one of the two segment vertices have traversed another segment, we have a collision.
-                    
-                    var vertices = obj.getVertices();
-                    
-                    //    collisions.addPair(movable, obj);
-                }
-            },
+            _totalAcceleration: vec2.create(),
             
             /**
              * Compute new linear velocities and positions.
@@ -681,11 +784,179 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
                 // We first integrate acceleration to update velocity, then integrate velocity to get new position.
                 // This is called semi-implicit Euler integration: It is fast, simple and inaccurate (but good enough for linear integration in games).
                 squishy.forEachOwnProp(this.movables, function (objId, obj) {
-                    vec2.Add(obj.velocity, vec2.MulSGet(obj.acceleration, dt));
+                    obj.onStep(dt);
+                
+                    vec2.add(this._totalAcceleration, obj.acceleration, this.config.Gravity);               // add gravity
                     
-                    this.lastPositionDelta = vec2.MulSGet(obj.velocity, dt);
-                    vec2.Add(obj.position, this.lastPositionDelta);
-                }.bind(this));
+                    vec2.scaleAndAdd(obj.velocity, obj.velocity, this._totalAcceleration, dt);              // update velocity
+                    
+                    
+                    vec2.scale(obj.lastPositionDelta, obj.velocity, dt);
+                    
+                    // add step height, so object can just "float" over small obstacles and walk up stairs
+                    if (!obj.isFalling()) {
+                        vec2.add(obj.position, obj.position, obj.stepHeight);
+                        vec2.subtract(obj.lastPositionDelta, obj.lastPositionDelta, obj.stepHeight); 
+                    }
+                    vec2.add(obj.position, obj.position, obj.lastPositionDelta);                 // update position
+                }, this);
+            },
+            
+            /**
+             * Detects all collision between the given movable and all potential collision candidates.
+             */
+            detectCollisions: function (movable) {
+                // TODO: Build kd-tree, BVI or other accelerating data structure to minimize collision search space
+                // check against every other possibly colliding object
+                var shape1 = movable.shape;
+                var pos1 = movable.position;
+                var dim1 = shape1.dimensions;
+                
+                // TODO: Get rid of pre-allocated temps
+                var center1 = vec2.copy(vec2.createTemp(), shape1.center);
+                var penetration = vec2.createTemp();
+                
+                // transform to world coordinates
+                vec2.add(center1, center1, pos1);
+                
+                for (var objectId in this.objects) {
+                    if (!this.objects.hasOwnProperty(objectId)) continue;
+                    if (movable.objectId == objectId) continue; // don't check intersection with itself (bodies are assumed to be rigid)
+                    var obj = this.objects[objectId];
+                    
+                    // TODO: Create map of shape<->shape collision algorithms and move this code out of here
+                    var shape2 = obj.shape;
+                    var pos2 = obj.position;
+                    var dim2 = shape2.dimensions;
+                    var center2 = shape2.center;
+                    squishy.assert(shape1.getShapeType() == ShapeType.AABB && shape2.getShapeType() == ShapeType.AABB, "Currently, only AABB<->AABB collision detection is supported");
+                    
+                    // transform into obj coordinates
+                    vec2.subtract(center1, center1, pos2);
+                    
+                    // we have a collision if: |center1 - center2| <= (dimensions1 + dimensions2)/2
+                    // same as: |center1 - center2| - dimensions1/2 - dimensions2/2 <= 0
+                    vec2.abs(penetration, vec2.subtract(penetration, center1, center2));
+                    vec2.scaleAndSubtract(penetration, penetration, dim1, .5);
+                    vec2.scaleAndSubtract(penetration, penetration, dim2, .5);
+                    
+                    if (penetration[0] < 0 && penetration[1] < 0) {
+                        // collision detected
+                        // add new collision pair, if it does not exist yet
+                        var pair = this.collisions.addPair(movable, obj);
+                        
+                        vec2.copy(pair.penetration, penetration);     // remember penetration value
+                    }
+                                        
+                    // Transform back into world coordinates
+                    vec2.add(center1, center1, pos2);
+                    
+                    
+                    //var vertices = obj.getVertices();
+                    
+                    //    collisions.addPair(movable, obj);
+                }
+            },
+            
+            /**
+             * Makes sure (optimistically) that the given pair does not intersect anymore after call, or very soon in the future.
+             * TODO: Support 
+             */
+            onNewCollision: function(pair) {
+                var obj1 = pair.obj1;
+                var obj2 = pair.obj2;
+                var penetration = pair.penetration
+                var shape1 = obj1.shape;
+                var shape2 = obj2.shape;
+                var pos1 = obj1.position;
+                var pos2 = obj2.position;
+                
+                squishy.assert(shape1.getShapeType() == ShapeType.AABB && shape2.getShapeType() == ShapeType.AABB, "Currently, only AABB<->AABB collision detection is supported");
+                
+                // continuous collision detection:
+                
+                // start by computing the competing vertices
+                var delta = obj1.lastPositionDelta;
+                var dx = delta[Axis.X];
+                var dy = delta[Axis.Y];
+                
+                // check vertical surfaces for collision
+                var x1 = 0, x2 = 0;
+                if (dx > 0) {
+                    // we are moving forward: check maxX1 against minX2
+                    x1 = shape1.max[Axis.X];
+                    x2 = shape2.min[Axis.X];
+                }
+                else {
+                    // we are moving backward: check minX1 against maxX2
+                    x1 = shape1.min[Axis.X];
+                    x2 = shape2.max[Axis.X];
+                }
+                
+                // check horizontal surfaces for collision
+                var y1 = 0, y2 = 0;
+                var down;
+                if (dy > 0) {
+                    // we are moving up: check maxY1 against minY2
+                    y1 = shape1.max[Axis.Y];
+                    y2 = shape2.min[Axis.Y];
+                    down = false;
+                }
+                else {
+                    // we are moving down: check minY1 against maxY2
+                    y1 = shape1.min[Axis.Y];
+                    y2 = shape2.max[Axis.Y];
+                    down = true;
+                }
+                
+                // transform obj1's coordinates into obj2's coordinate system
+                var xTransform = pos1[Axis.X] - pos2[Axis.X];
+                var yTransform = pos1[Axis.Y] - pos2[Axis.Y];
+                x1 += xTransform;
+                y1 += yTransform;
+                
+                // check against horizontal and vertical surfaces, and take the shorter route:
+                var tx = (x1-x2)/delta[Axis.X];      // bump against vertical surface
+                var ty = (y1-y2)/delta[Axis.Y];      // bump against horizontal surface
+                
+                var bumpAxis = tx < ty && dx > 0 ? Axis.X : Axis.Y;        // determine in which direction motion was stopped abruptly
+                var t = bumpAxis == Axis.X ? tx : ty;
+                if (!isFinite(t)) return;       // no real collision
+                
+                squishy.assert(t >= 0 && t <= 1, "Collision resolution bug: " + y1 + ", " + y2);
+                
+                // snap back to surface and set velocity to 0:
+                obj1.position[bumpAxis] -= t * delta[bumpAxis];
+                obj1.velocity[bumpAxis] = 0;        // make sure, it stops "running against the wall", at least for now
+                
+                //pair.surface1 = shape1.getSide(bumpAxis, isMin);
+                
+                if (down && bumpAxis == Axis.Y) {
+                    // object hit the "ground"
+                    pair.isGroundCollision = true;
+                    if (this.currentIteration - obj1.lastGroundIteration > 1) {
+                        // object was not on ground in the last iteration
+                        obj1.onHitGround();
+                    }
+                    obj1.lastGroundIteration = this.currentIteration;
+                }
+                else {
+                    // object hit something that is not the ground (probably wall or ceiling)
+                    pair.isGroundCollision = false;
+                }
+
+                // NOTE: We are assuming that obj1 is a movable and obj2 is not.
+                // TODO: For proper Movable<->Movable collision resolution, we need to solve transfer of momentum equation.
+                // TODO: Add a second round of collision resolution to check if there are still collisions
+                //    -> If there are, use least-movement collision resolution (move by the least distance necessary to move them apart)
+                //    -> Repeat a few times
+            },
+            
+            onContactGone: function(pair) {
+                if (pair.isGroundCollision && pair.obj1.lastGroundIteration != this.currentIteration) {
+                    // lost contact with the ground (object underneath)
+                    pair.obj1.onLeftGround();
+                }
             }
         }
     );
@@ -771,9 +1042,10 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
                 super_.rotate.call(this, theta);
             },
 
-            translate: function (x, y) {
-                this._matrix = this._matrix.translate(x, y);
-                super_.translate.call(this, x, y);
+            translate: function (dx, dy) {
+                if (dx == 0 && dy == 0) return;
+                this._matrix = this._matrix.translate(dx, dy);
+                super_.translate.call(this, dx, dy);
             },
 
             transform: function (a, b, c, d, e, f) {
@@ -828,6 +1100,63 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
 
 
     // #######################################################################################################################
+    // Commands have a name, description and a callback
+    
+    // TODO: Localization of names and descriptions
+    // TODO: Proper parameter support for commands
+    
+    /**
+     * @constructor
+     */
+    var Command = squishy.createClass(
+        function (def) {
+            squishy.assert(def.name);
+            squishy.assert(def.callback);
+            
+            this.name = def.name;
+            this.prettyName = def.prettyName || def.name;
+            this.callback = def.callback;
+            this.description = def.description || "";
+        },{
+            // prototype
+            setOwner: function(owner) { this.owner = owner; },
+            run: function() {
+                squishy.assert(this.owner, "You forgot to call UICommand.setOwner or Command.createCommandMap.");
+                this.callback.apply(this.owner, arguments);  // call call back on UI object with all arguments passed as-is
+            }
+        }
+    );
+    
+    /**
+     * Takes the owner of all commands, their definitions and 
+     * returns a new map of Command objects.
+     */
+    Command.createCommandMap = function(owner, commandDefinitions) {
+        var map = {};
+        squishy.forEachOwnProp(commandDefinitions, function(name, def) {
+            def.name = name;
+            var cmd = new Command(def);
+            cmd.setOwner(owner);
+            map[name] = cmd;
+        });
+        return map;
+    };
+    
+    if ($) {
+        // if there is a UI (and jQuery support), we also want to append the commands to the toolbar
+        Command.addCommandsToToolbar = function(commandMap, toolbar, buttonCSS) {
+            squishy.forEachOwnProp(commandMap, function(name, cmd) {
+                var button = $("<button>");
+                button.text(cmd.prettyName);
+                button.css(buttonCSS);
+                button.click(function(evt) { cmd.run(); });     // currently, can only run commands without arguments here
+                toolbar.append(button);
+            });
+        };
+    }
+
+
+    // #######################################################################################################################
     // UI settings & SimplePlatformerUI Class
 
     /**
@@ -863,18 +1192,14 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
 
         "background-color": "grey"
     };
-
-    /**
-     * @const
-     */
-    var textContCSS = {
+    
+    var toolbarCSS = {
         "position": "absolute",
-        "left": "0px",
         "top": "0px",
+        "left": "0px",
         "margin": "0px",
         "padding": "0px",
         "width": "100%",
-        "height": "40px",
         "background-color": "rgba(30,180,30,0.1)",
         "z-index": 10
     };
@@ -882,11 +1207,12 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
     /**
      * @const
      */
-    var textCSS = {
+    var toolbarElCSS = {
+        "float": "left",
         "margin": "0px",
         "padding": "6px",
-        "font-size": "1.5em",
-        "z-index": 20
+        "font-size": "1.2em",
+        "z-index": 22
     };
 
     /**
@@ -894,7 +1220,7 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
      * @constructor
      */
     var SimplePlatformerUI = squishy.createClass(
-        function (containerEl, DebugDrawEnabled, game) {
+        function (containerEl, DebugDrawEnabled, game, commandMap) {
             // set object properties
             this.containerEl = containerEl;
             this.DebugDrawEnabled = DebugDrawEnabled;
@@ -903,6 +1229,7 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
             this.selected = {};
 
             // setup everything
+            this.commands = commandMap || {};
             this.registerEventListeners();
             this.setupUI();
 
@@ -927,13 +1254,19 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
                 // HTML elements need tabindex to be focusable (see: http://stackoverflow.com/questions/5965924/jquery-focus-to-div-is-not-working)
                 canvas.attr("tabindex", 0);
 
+                // create toolbar
+                // TODO: Proper toolbar
+                var toolbar = this.toolbar = $("<div>");
+                toolbar.css(toolbarCSS);
+                this.containerEl.append(toolbar);
+                
+                // add buttons
+                Command.addCommandsToToolbar(this.commands, toolbar, toolbarElCSS);
+                
                 // create, style and append text box
-                var textCont = this.textCont = $("<div>");
-                textCont.css(textContCSS);
-                this.containerEl.append(textCont);
                 var text = this.text = $("<pre>hi</pre>");
-                text.css(textCSS);
-                textCont.append(text);
+                text.css(toolbarElCSS);
+                toolbar.append(text);
 
                 var canvasDOM = this.canvas[0];
                 
@@ -954,15 +1287,12 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
                     context.scale(1, -1);
                     context.translate(0, -canvasDOM.height);
                     
-                    vec2.SetXY(this.viewport.min, 0, 0);
-                    vec2.SetXY(this.viewport.max, canvasDOM.width, canvasDOM.height);
+                    this.onViewportChanged();
                 }.bind(this);
 
                 // enhance canvas context functionality
                 var context = canvasDOM.getContext('2d');
                 enhanceCanvas(canvasDOM);       // keep track of transformation matrix, and some other goodies...
-                
-                fixAspectRatio();
                 
                 // always keep the same aspect ratio
                 $(window).resize(function() {
@@ -973,19 +1303,18 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
                 // mouse interaction
                 this.cursorClient = vec2.create();
                 this.cursorWorld = vec2.create();
+                
                 canvas.mousemove(function (event) {
                     // update mouse coordinates
-                    vec2.SetXY(this.cursorClient, event.clientX, event.clientY);
+                    vec2.set(this.cursorClient, event.clientX, event.clientY);
                     this.onCursorMove();
                 }.bind(this));
-                squishy.onClick(canvasDOM, function(event) {
+                squishy.onPress(canvasDOM, function(event) {
                     this.onTouch();
                 }.bind(this));
-
-                // keep track of transformation changes
-
-                //context.translate(w, h);
-                //context.rotate(Math.PI);                          // turn context up-side-down, so y axis is pointing up
+                
+                // Make full use of current canvas width and height (by default, it is zoomed to display some 300 x 150 pixels only)
+                fixAspectRatio();
             },
             
             
@@ -1000,16 +1329,16 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
             },
 
             _render: function (timestamp) {
-                this.translate([1,0]);
+                //this.translate([1,0]);
                 
                 // re-draw all objects
                 var canvasDOM = this.canvas[0];
                 var context = canvasDOM.getContext('2d');
                 
                 // clear background (using the CSS background-color property)
-                var w = canvasDOM.width;
-                var h = canvasDOM.height;
-                context.clearRect(0, 0, w, h);
+                var min = this.viewport.min;
+                var dim = this.viewport.dimensions;
+                context.clearRect(min[Axis.X], min[Axis.Y], canvasDOM.width, canvasDOM.height);
 
                 var tmp = vec2.create();
                 
@@ -1040,8 +1369,8 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
              * Render an AABB shape.
              */
             _renderAABB: function(context, from, obj, shape) {
-                vec2.Set(from, obj.position);
-                vec2.Add(from, shape.min);
+                vec2.copy(from, obj.position);
+                vec2.add(from, from, shape.min);
 
                 // draw filled rectangle with a border
                 // see http://www.html5canvastutorials.com/tutorials/html5-canvas-rectangles/
@@ -1069,9 +1398,9 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
                     
                 // draw surface normals
                 shape.getSurfaces().forEach(function(line) {
-                    var normal = vec2.MulSGet(line.normal, 10);
-                    from = vec2.AddGet(obj.position, line.from);
-                    var from = vec2.AddGet(from, vec2.MulSGet(line.delta, .5));
+                    var normal = vec2.scale(vec2.create(), line.normal, 10);
+                    vec2.add(from, obj.position, line.from);
+                    vec2.scaleAndAdd(from, from, line.delta, .5);
                     context.drawArrow(from, normal, 5);
                 });
             },
@@ -1096,10 +1425,16 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
                 this.client2WorldMatrix = this.getContext().getInverseMatrix();
             
                 // re-compute viewport aabb
-                vec2.SetXY(this.viewport.max, 0, 0);
-                vec2.SetXY(this.viewport.max, this.canvas.width, this.canvas.height);
+                vec2.set(this.viewport.min, 0, 0);
+                vec2.set(this.viewport.max, this.canvas[0].width, this.canvas[0].height);
                 this.transformClientToWorld(this.viewport.min);
                 this.transformClientToWorld(this.viewport.max);
+                
+                var min = vec2.copy(vec2.create(), this.viewport.min);
+                vec2.min(this.viewport.min, this.viewport.max, min);
+                vec2.max(this.viewport.max, this.viewport.max, min);
+                
+                vec2.subtract(this.viewport.dimensions, this.viewport.max, this.viewport.min);
             
                 // cursor moved (relative to world)
                 this.onCursorMove();
@@ -1110,7 +1445,7 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
              * Note that moving the viewport also moves the mouse relative to the world.
              */
             onCursorMove: function() {
-                vec2.Set(this.cursorWorld, this.cursorClient);
+                vec2.copy(this.cursorWorld, this.cursorClient);
                 this.transformClientToWorld(this.cursorWorld);
                 
                 // display mouse world coordinates
@@ -1147,18 +1482,16 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
             /**
              * Translates the viewport by the given 2D vector.
              */
-            translate: function(vec) {
-                squishy.assert(vec && vec.length && vec.length == 2, "vec must be an array of length 2, representing x and y components.");
-                this.getContext().translate(-vec[0], -vec[1]);
+            translate: function(dx, dy) {
+                this.getContext().translate(-dx, -dy);
                 this.onViewportChanged();
             },
             
             /**
              * Scales the viewport by the given 2D vector.
              */
-            scale: function(vec) {
-                squishy.assert(vec && vec.length && vec.length == 2, "vec must be an array of length 2, representing x and y components.");
-                this.getContext().scale(1/vec[0], 1/vec[1]);
+            scale: function(dx, dy) {
+                this.getContext().scale(1/dx, 1/dy);
                 this.onViewportChanged();
             },
             
@@ -1215,19 +1548,26 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
 
     // #######################################################################################################################
     // Setup a simple world & start UI
+    
+    /** 
+     * @const
+     */
+    var GameConfig = {
+    };
 
     // setup world configuration
-    var worldSize = 1000;
+    var worldSize = 10000;
     var gameCfg = {
         
     };
     var worldCfg = {
-        dt: 60,
-        gravity: vec2.fromValues(1, 0),
-        worldBox: new AABB([0, 0], [worldSize, worldSize])
+        Dt: .06,
+        Gravity: vec2.fromValues(0, -40),
+        WorldBox: new AABB([0, 0], [worldSize, worldSize]),
     };
 
     var game = new SimplePlatformerGame(gameCfg, worldCfg);
+    var world = game.world;
 
     // creates a static box object
     var AddBox = function (x, y, w, h) {
@@ -1240,13 +1580,140 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
         game.world.addObject(obj);
         return obj;
     };
+    
+    // creates a simple AABB agent
+    var AddAgent = function (x, y, w, h) {
+        var def = {
+            position: [x, y],
+            shape: new AABBShape([0, 0], [w, h]),
+            maxHealth: 1,
+            
+            /**
+             * Horizontal speed when moving left and right on the ground.
+             */
+            groundControlSpeed: 30,
+            
+            /**
+             * How much of the ground speed one gets when mid-air (in the real world, this is 0, unless you have a jetpack, or other propulsion methods).
+             */
+            airControlRatio: .7,
+            
+            /**
+             * Vertical initial speed when jumping.
+             */
+            jumpSpeed: 130
+        };
 
-    AddBox(10, 10, 100, 10);
-    AddBox(10, 190, 50, 10);
-    AddBox(400, 600, 30, 10);
+        var obj = new Agent(def);
+        game.world.addObject(obj);
+        return obj;
+    };
 
+    // add some static environment
+    var box1 = AddBox(0, 0, 1500, 100);
+    AddBox(200, 100, 10000, 150);
+    
+    // add an agent
+    var playerAgent = AddAgent(100, 120, 10, 60);
+    
+    // game controls
+    var commandMap = Command.createCommandMap(game.world, {
+        startstop: {
+            prettyName: "Start/Stop",
+            description: "Starts or stops the game.",
+            keyboard: "s",
+            callback: function() {
+                this.startStopLoop();
+            }
+        },
+        steponce: {
+            prettyName: "Step Once",
+            description: "Takes a single simulation step.",
+            keyboard: "o",
+            callback: function() {
+                this.step();
+            }
+        }
+    });
+    
+    
+    // bind navigation keys
+    var down = 0, downLeft = false, downRight = false;
+    Mousetrap.bind('left', function(e) {
+        if (!downLeft) {
+            downLeft = true;
+            ++down;
+            playerAgent.performAction(AgentAction.startMoveLeft);
+        }
+    }, 'keydown');
+    Mousetrap.bind('right', function(e) {
+        if (!downRight) {
+            downRight = true;
+            ++down;
+            playerAgent.performAction(AgentAction.startMoveRight);
+        }
+    }, 'keydown');
+    Mousetrap.bind('up', function(e) {
+        playerAgent.performAction(AgentAction.jump);
+    }, 'keydown');
+    Mousetrap.bind(['left', 'right'], function(e) {
+        --down;
+        if (down <= 0) {
+            down = 0;
+            downRight = downLeft = false;
+            playerAgent.performAction(AgentAction.stopMove);
+        }
+    }, 'keyup');
+    
+    
     // start UI
     $("body").css("top", "10px");
     var gameEl = $("#game");
-    var gameUI = new SimplePlatformerUI(gameEl, true, game);
+    var ui = new SimplePlatformerUI(gameEl, true, game, commandMap);
+    
+    
+    // follow agent in UI:
+    
+    // how much of the viewport width and height we at least want to have to left, right, bottom and top of the agent
+    var scrollMargin = .4;  // if this number is .5, the viewport will always be centered on the agent
+    var pos = vec2.create();
+    var minMargin = vec2.create(), maxMargin = vec2.create();
+    var delta = vec2.create();
+    world.events.step.addListener(function() {
+        var viewport = ui.viewport;
+        var vmin = viewport.min, vmax = viewport.max;
+        
+        vec2.scaleAndAdd(pos, playerAgent.position, playerAgent.shape.center, .5);  // compute center
+        
+        // compute distance of margins from min x and y
+        vec2.scaleAndAdd(minMargin, vmin, viewport.dimensions, scrollMargin);
+        
+        // compute distance of margins from max x and y
+        vec2.scaleAndSubtract(maxMargin, vmax, viewport.dimensions, scrollMargin);
+        
+        // compute margin penetration
+        vec2.subtract(delta, pos, minMargin);       // min margin
+        var dx = 0, dy = 0;
+        if (delta[Axis.X] < 0) {
+            dx = delta[Axis.X];
+        }
+        if (delta[Axis.Y] < 0) {
+            dy = delta[Axis.Y];
+        }
+        vec2.subtract(delta, pos, maxMargin);       // max margin
+        if (delta[Axis.X] > 0) {
+            dx = delta[Axis.X];
+        }
+        if (delta[Axis.Y] > 0) {
+            dy = delta[Axis.Y];
+        }
+        
+        //console.log([dx, dy]);
+        // move viewport
+        ui.translate(dx, dy);
+    });
+
+    
+    // start game
+    world.startLoop();
 });
