@@ -334,6 +334,8 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
                 this.acceleration = vec2.create();
             }
             
+            this.lastPosition = vec2.copy(vec2.create(), this.position);
+            
             this.onGround = false;
             this.lastGroundIteration = 0;
             this.lastPositionDelta = vec2.create();
@@ -370,7 +372,8 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
                 this.onGround = false;
             },
             
-            onStep: function(dt) {},
+            onStep: function(dt) {
+            },
         }
     );
 
@@ -408,7 +411,7 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
             this.health = this.maxHealth;
             
             // intermediate variable
-            this.controlSpeed = 0;
+            this.currentControlSpeed = 0;
         }, {
             // methods
 
@@ -424,7 +427,7 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
 
             // Agent actions
             getCurrentControlSpeed: function() {
-                return this.isFalling() ? this.groundControlSpeed * this.airControlRatio : this.groundControlSpeed;
+                return this.isFalling() ? this.currentControlSpeed * this.airControlRatio : this.currentControlSpeed;
             },
 
             /**
@@ -433,13 +436,13 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
             performAction: function (action) {
                 switch (action) {
                 case (AgentAction.startMoveLeft):
-                    this.controlSpeed = -this.getCurrentControlSpeed();
+                    this.currentControlSpeed = -this.groundControlSpeed;
                     break;
                 case (AgentAction.startMoveRight):
-                    this.controlSpeed = this.getCurrentControlSpeed();
+                    this.currentControlSpeed = this.groundControlSpeed;
                     break;
                 case (AgentAction.stopMove):
-                    this.controlSpeed = 0;
+                    this.currentControlSpeed = 0;
                     break;
                 case (AgentAction.jump):
                     if (!this.isFalling()) {
@@ -450,7 +453,7 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
             },
             
             onStep: function(dt) {
-                this.velocity[Axis.X] = this.controlSpeed;
+                this.velocity[Axis.X] = this.getCurrentControlSpeed();
             }
         }
     );
@@ -617,6 +620,7 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
 
             this.lastObjectId = 0; // running id for new objects
             this.currentIteration = 1;
+            this.time = 0;
 
             // assign properties
             this.config = config;
@@ -733,35 +737,72 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
             /**
              * Start or stop running.
              */
-            startStopLoop: function(dt) {
-                if (this.loopTimer) this.stopLoop();
+            startStopLoop: function() {
+                if (this.running) this.stopLoop();
                 else this.startLoop();
             },
             
-            startLoop: function(dt) {
-                if (this.loopTimer) return;
-                //this.loopTimer = setInterval(this.step.bind(this), dt);
-                this.loopTimer = setInterval(this.step.bind(this), dt * 1000);
+            startLoop: function() {
+                if (this.running) return;
+                //this.continueLoop();
+                this.lastStepTime = squishy.getCurrentTimeMillisHighRes();  // millis
+                this.running = true;
+                //this.loopTimer = setInterval(function() { this.advanceTime(); }.bind(this), this.config.Dt * 1000);
             },
             
-            stopLoop: function(dt) {
-                if (!this.loopTimer) return;
-                clearInterval(this.loopTimer);
-                this.loopTimer = null;
+            continueLoop: function() {
+                // TODO: Compute correct dt
+            },
+            
+            stopLoop: function() {
+                if (!this.running) return;
+                this.running = false;
+                // clearTimeout(this.loopTimer);
+                // this.loopTimer = null;
+            },
+            
+            isRunning: function() { return this.running; },
+
+            /**
+             * Get time since last step, in seconds.
+             */
+            getDtSinceLastStep: function () {
+                if (!this.isRunning()) return 0;
+                var now = squishy.getCurrentTimeMillisHighRes();  // millis
+                return (now - this.lastStepTime) / 1000;
+            },
+            
+            /**
+             * Only call this from a timer.
+             * Returns the ratio of remaining time left to frame-time.
+             */
+            advanceTime: function() {
+                var dt = this.getDtSinceLastStep();
+                while (dt > this.config.Dt) {
+                    dt -= this.config.Dt;
+                    this.step();
+                }
+                return dt/this.config.Dt;
             },
 
             /**
-             * Advance step by given amount of time. Uses config.Dt, if dt is not given.
-             */
+             * Take a simulation step of the given length or pre-configured length.
+             */            
             step: function (dt) {
-                // TODO: Compute actual dt
-                dt = dt || this.config.Dt;
-
+                // update iteration count & compute actual time passed
+                ++this.currentIteration;
+                var dt = dt || this.config.Dt;
+                this.lastStepTime += dt * 1000;  // millis
+                
                 // update velocity and position
-                this.integrateStep(dt);
+                squishy.forEachOwnProp(this.movables, function (objId, obj) {
+                    vec2.copy(obj.lastPosition, obj.position);                  // set lastPosition
+                    obj.onStep(dt);
+                    this.integrateStep(obj, dt);
+                }, this);
 
                 // detect collisions
-                this.collisions.setCurrentIteration(++this.currentIteration);
+                this.collisions.setCurrentIteration(this.currentIteration);
                 for (var objId in this.movables) {
                     if (!this.movables.hasOwnProperty(objId)) continue;
                     this.detectCollisions(this.movables[objId]);
@@ -769,37 +810,46 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
 
                 // resolve collisions
                 this.collisions.callForEachPair(this.onNewCollision, this.onContactGone, this);
-
+                
                 // run event listeners
                 this.events.step.fire(dt);
             },
             
-            _totalAcceleration: vec2.create(),
+            // TODO: Bad bad bad!
+            _tmp: vec2.create(),
             
             /**
              * Compute new linear velocities and positions.
              */
-            integrateStep: function (dt) {
+            integrateStep: function (obj, dt) {
                 // Linear integration: We do not support angular velocity or rotation, which makes things a whole lot easier.
                 // We first integrate acceleration to update velocity, then integrate velocity to get new position.
                 // This is called semi-implicit Euler integration: It is fast, simple and inaccurate (but good enough for linear integration in games).
-                squishy.forEachOwnProp(this.movables, function (objId, obj) {
-                    obj.onStep(dt);
+                vec2.add(this._tmp, obj.acceleration, this.config.Gravity);               // add gravity
+                vec2.scaleAndAdd(obj.velocity, obj.velocity, this._tmp, dt);              // update velocity
+                vec2.scale(obj.lastPositionDelta, obj.velocity, dt);
                 
-                    vec2.add(this._totalAcceleration, obj.acceleration, this.config.Gravity);               // add gravity
-                    
-                    vec2.scaleAndAdd(obj.velocity, obj.velocity, this._totalAcceleration, dt);              // update velocity
-                    
-                    
-                    vec2.scale(obj.lastPositionDelta, obj.velocity, dt);
-                    
-                    // add step height, so object can just "float" over small obstacles and walk up stairs
-                    if (!obj.isFalling()) {
-                        vec2.add(obj.position, obj.position, obj.stepHeight);
-                        vec2.subtract(obj.lastPositionDelta, obj.lastPositionDelta, obj.stepHeight); 
-                    }
-                    vec2.add(obj.position, obj.position, obj.lastPositionDelta);                 // update position
-                }, this);
+                // add step height, so object can just "float" over small obstacles, and walk up stairs
+                // if (!obj.isFalling()) {
+                    // vec2.add(obj.position, obj.position, obj.stepHeight);
+                    // vec2.add(obj.lastPositionDelta, obj.lastPositionDelta, obj.stepHeight); 
+                // }
+                vec2.add(obj.position, obj.position, obj.lastPositionDelta);                 // update position
+            },
+            
+            /**
+             * @see http://blog.allanbishop.com/box-2d-2-1a-tutorial-part-10-fixed-time-step/
+             */
+            getRenderPosition: function(obj, timeRatio) {
+                if (!obj.isObjectType(ObjectType.Movable)) return obj.position;
+                
+                // interpolate between the previous two positions
+                var tmp = this._tmp;            // TODO: Bad!
+                
+                vec2.subtract(tmp, obj.position, obj.lastPosition);
+                vec2.scaleAndAdd(tmp, obj.lastPosition, tmp, timeRatio);
+                
+                return tmp;
             },
             
             /**
@@ -916,17 +966,20 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
                 y1 += yTransform;
                 
                 // check against horizontal and vertical surfaces, and take the shorter route:
-                var tx = (x1-x2)/delta[Axis.X];      // bump against vertical surface
-                var ty = (y1-y2)/delta[Axis.Y];      // bump against horizontal surface
+                var tx = Math.abs((x1-x2)/delta[Axis.X]);      // bump against vertical surface
+                var ty = Math.abs((y1-y2)/delta[Axis.Y]);      // bump against horizontal surface
                 
-                var bumpAxis = tx < ty && dx > 0 ? Axis.X : Axis.Y;        // determine in which direction motion was stopped abruptly
+                var bumpAxis = tx < ty ? Axis.X : Axis.Y;        // determine in which direction motion was stopped abruptly
                 var t = bumpAxis == Axis.X ? tx : ty;
                 if (!isFinite(t)) return;       // no real collision
                 
+                // TODO: This bug is caused by temporal aliasing, especially with small values for dt.
+                //     -> Need discrete collision detection to take care of that.
                 squishy.assert(t >= 0 && t <= 1, "Collision resolution bug: " + y1 + ", " + y2);
                 
                 // snap back to surface and set velocity to 0:
-                obj1.position[bumpAxis] -= t * delta[bumpAxis];
+                var correction = t * delta[bumpAxis];
+                obj1.position[bumpAxis] -= correction;
                 obj1.velocity[bumpAxis] = 0;        // make sure, it stops "running against the wall", at least for now
                 
                 //pair.surface1 = shape1.getSide(bumpAxis, isMin);
@@ -1043,7 +1096,6 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
             },
 
             translate: function (dx, dy) {
-                if (dx == 0 && dy == 0) return;
                 this._matrix = this._matrix.translate(dx, dy);
                 super_.translate.call(this, dx, dy);
             },
@@ -1329,7 +1381,11 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
             },
 
             _render: function (timestamp) {
-                //this.translate([1,0]);
+                // advance physics simulation
+                var timeRatio = this.world.advanceTime(timeRatio);
+                
+                // move viewport to right position
+                this.scrollViewport(timeRatio);
                 
                 // re-draw all objects
                 var canvasDOM = this.canvas[0];
@@ -1351,9 +1407,10 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
                     var shapeType = shape.getShapeType();
                     switch (shapeType) {
                         case ShapeType.AABB:
-                            this._renderAABB(context, tmp, obj, shape);
+                            var pos = this.world.getRenderPosition(obj, timeRatio);        // compute a more accurate guess of current position
+                            this._renderAABB(context, tmp, obj, pos, shape);
                             if (this.DebugDrawEnabled) {
-                                this._debugDrawAABB(context, tmp, obj, shape);
+                                this._debugDrawAABB(context, tmp, obj, pos, shape);
                             }
                             break;
                         default:
@@ -1366,10 +1423,76 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
             },
             
             /**
+             * Scroll viewport to focus on playerAgent.
+             * TODO: Fix jittering
+             */
+            scrollViewport: function(timeRatio) {
+                // ##########################
+                // follow agent in UI:
+                
+                // how much of the viewport width and height we at least want to have to left, right, bottom and top of the agent
+                var scrollMargin = .4;  // if this number is .5, the viewport will always be centered on the agent
+                var pos = vec2.create();
+                var minMargin = vec2.create(), maxMargin = vec2.create();
+                var delta = vec2.create();
+                var world = this.world;
+                var ui = this;
+                world.events.step.addListener(function() {
+                    var viewport = ui.viewport;
+                    var vmin = viewport.min, vmax = viewport.max;
+                    vec2.copy(pos, world.getRenderPosition(ui.playerAgent, timeRatio));
+                    
+                    vec2.scaleAndAdd(pos, pos, ui.playerAgent.shape.center, .5);  // compute center
+                    
+                    // compute distance of margins from min x and y
+                    vec2.scaleAndAdd(minMargin, vmin, viewport.dimensions, scrollMargin);
+                    
+                    // compute distance of margins from max x and y
+                    vec2.scaleAndSubtract(maxMargin, vmax, viewport.dimensions, scrollMargin);
+                    
+                    // compute margin penetration
+                    // and clip against world-box
+                    vec2.subtract(delta, pos, minMargin);       // min margin
+                    
+                    var wmin = world.config.WorldBox.min;
+                    var wmax = world.config.WorldBox.max;
+                    
+                    var dx = 0, dy = 0;
+                    if (delta[Axis.X] < 0) {
+                        dx = delta[Axis.X];
+                        dx = Math.max(dx, wmin[Axis.X] - pos[Axis.X]);
+                        dx = Math.min(dx, 0);       // must be less than 0
+                    }
+                    if (delta[Axis.Y] < 0) {
+                        dy = delta[Axis.Y];
+                        dy = Math.max(dy, wmin[Axis.Y] - pos[Axis.Y]);
+                        dy = Math.min(dy, 0);       // must be less than 0
+                    }
+                    vec2.subtract(delta, pos, maxMargin);       // max margin
+                    if (delta[Axis.X] > 0) {
+                        dx = delta[Axis.X];
+                        dx = Math.min(dx, wmax[Axis.X] - pos[Axis.X]);
+                        dx = Math.max(dx, 0);       // must be greater 0
+                    }
+                    if (delta[Axis.Y] > 0) {
+                        dy = delta[Axis.Y];
+                        dy = Math.min(dy, wmax[Axis.Y] - pos[Axis.Y]);
+                        dy = Math.max(dy, 0);       // must be greater 0
+                    }
+                    
+                    //console.log([dx, dy]);
+                    // move viewport
+                    ui.translate(dx, dy);
+                });
+            },
+            
+            /**
              * Render an AABB shape.
              */
-            _renderAABB: function(context, from, obj, shape) {
-                vec2.copy(from, obj.position);
+            _renderAABB: function(context, from, obj, pos, shape) {
+                //if (obj.velocity)
+                    //console.log(pos);
+                vec2.copy(from, pos);
                 vec2.add(from, from, shape.min);
 
                 // draw filled rectangle with a border
@@ -1385,7 +1508,7 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
             /**
              * Visualize stuff for debugging physics.
              */
-            _debugDrawAABB: function(context, from, obj, shape) {
+            _debugDrawAABB: function(context, from, obj, pos, shape) {
                 context.lineWidth = 1.5;
                 context.strokeStyle = '#AA1111';        // dark red
                 
@@ -1399,7 +1522,7 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
                 // draw surface normals
                 shape.getSurfaces().forEach(function(line) {
                     var normal = vec2.scale(vec2.create(), line.normal, 10);
-                    vec2.add(from, obj.position, line.from);
+                    vec2.add(from, pos, line.from);
                     vec2.scaleAndAdd(from, from, line.delta, .5);
                     context.drawArrow(from, normal, 5);
                 });
@@ -1483,6 +1606,7 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
              * Translates the viewport by the given 2D vector.
              */
             translate: function(dx, dy) {
+                if (dx == 0 && dy == 0) return;
                 this.getContext().translate(-dx, -dy);
                 this.onViewportChanged();
             },
@@ -1561,8 +1685,8 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
         
     };
     var worldCfg = {
-        Dt: .06,
-        Gravity: vec2.fromValues(0, -40),
+        Dt: .03,
+        Gravity: vec2.fromValues(0, -1000),
         WorldBox: new AABB([0, 0], [worldSize, worldSize]),
     };
 
@@ -1591,7 +1715,7 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
             /**
              * Horizontal speed when moving left and right on the ground.
              */
-            groundControlSpeed: 30,
+            groundControlSpeed: 700,
             
             /**
              * How much of the ground speed one gets when mid-air (in the real world, this is 0, unless you have a jetpack, or other propulsion methods).
@@ -1601,7 +1725,7 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
             /**
              * Vertical initial speed when jumping.
              */
-            jumpSpeed: 130
+            jumpSpeed: 500
         };
 
         var obj = new Agent(def);
@@ -1610,11 +1734,13 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
     };
 
     // add some static environment
-    var box1 = AddBox(0, 0, 1500, 100);
-    AddBox(200, 100, 10000, 150);
+    AddBox(200, 100, 10000, 80);                // long ground box
+    AddBox(0, 0, 1500, 100);                    // long box underneath ground box
+    AddBox(1800, 180, 100, 80);                 // little bump on ground
+    AddBox(1200, 250, 100, 20);                 // mid-air platform
     
     // add an agent
-    var playerAgent = AddAgent(100, 120, 10, 60);
+    var playerAgent = AddAgent(1500, 260, 10, 40);
     
     // game controls
     var commandMap = Command.createCommandMap(game.world, {
@@ -1639,6 +1765,12 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
     
     // bind navigation keys
     var down = 0, downLeft = false, downRight = false;
+    var stopMoving = function() {
+        down = 0;
+        downRight = downLeft = false;
+        playerAgent.performAction(AgentAction.stopMove);
+    };
+    
     Mousetrap.bind('left', function(e) {
         if (!downLeft) {
             downLeft = true;
@@ -1659,61 +1791,22 @@ require(dependencies, function (jquery, jqueryUI, jqueryUILayout, mousetrap, vec
     Mousetrap.bind(['left', 'right'], function(e) {
         --down;
         if (down <= 0) {
-            down = 0;
-            downRight = downLeft = false;
-            playerAgent.performAction(AgentAction.stopMove);
+            stopMoving();
         }
     }, 'keyup');
+    
+    $(window).focusout(function() {
+        // stop moving right away
+        stopMoving();
+    });
     
     
     // start UI
     $("body").css("top", "10px");
     var gameEl = $("#game");
     var ui = new SimplePlatformerUI(gameEl, true, game, commandMap);
+    ui.playerAgent = playerAgent;
     
-    
-    // follow agent in UI:
-    
-    // how much of the viewport width and height we at least want to have to left, right, bottom and top of the agent
-    var scrollMargin = .4;  // if this number is .5, the viewport will always be centered on the agent
-    var pos = vec2.create();
-    var minMargin = vec2.create(), maxMargin = vec2.create();
-    var delta = vec2.create();
-    world.events.step.addListener(function() {
-        var viewport = ui.viewport;
-        var vmin = viewport.min, vmax = viewport.max;
-        
-        vec2.scaleAndAdd(pos, playerAgent.position, playerAgent.shape.center, .5);  // compute center
-        
-        // compute distance of margins from min x and y
-        vec2.scaleAndAdd(minMargin, vmin, viewport.dimensions, scrollMargin);
-        
-        // compute distance of margins from max x and y
-        vec2.scaleAndSubtract(maxMargin, vmax, viewport.dimensions, scrollMargin);
-        
-        // compute margin penetration
-        vec2.subtract(delta, pos, minMargin);       // min margin
-        var dx = 0, dy = 0;
-        if (delta[Axis.X] < 0) {
-            dx = delta[Axis.X];
-        }
-        if (delta[Axis.Y] < 0) {
-            dy = delta[Axis.Y];
-        }
-        vec2.subtract(delta, pos, maxMargin);       // max margin
-        if (delta[Axis.X] > 0) {
-            dx = delta[Axis.X];
-        }
-        if (delta[Axis.Y] > 0) {
-            dy = delta[Axis.Y];
-        }
-        
-        //console.log([dx, dy]);
-        // move viewport
-        ui.translate(dx, dy);
-    });
-
-    
-    // start game
+    // start game loop (only sets start time, for now)
     world.startLoop();
 });
